@@ -1,0 +1,524 @@
+#!/usr/bin/env python
+
+# Copyright 2016 LosFuzzys. All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+import re
+import tempfile
+import sys
+import argparse
+import json
+import configparser
+from urllib.parse import urlparse
+
+import mwclient
+import pypandoc
+
+from .setup_logging import setup_logging
+from .padclient import CTFPadClient
+
+
+DO_OVERWRITE = False
+
+SOURCE_FILE_EXTENSIONS = {'py': 'python',
+                          'rb': 'ruby',
+                          'c': 'c',
+                          'h': 'c++',
+                          'cpp': 'c++',
+                          'cc': 'c++',
+                          'hpp': 'c++',
+                          'php': 'php',
+                          'php5': 'php',
+                          'pl': 'perl',
+                          'js': 'javascript',
+                          'jsp': 'jsp',
+                          'rs': 'rust',
+                          'go': 'go',
+                          'hs': 'haskell',
+                          'cl': 'lisp',
+                          'coffee': 'coffeescript',
+                          'html': 'html',
+                          'xml': 'xml',
+                          'json': 'json',
+                          'sh': 'bash',
+                          'bash': 'bash',
+                          'S': 'asm',
+                          's': 'asm',
+                          'll': 'llvm',
+                          'scm': 'scheme',
+                          'java': 'java',
+                          'scala': 'scala',
+                          'clojure': 'clojure',
+                          'cs': 'csharp',
+                          }
+IMAGE_FILE_EXTENSIONS = ['png', 'jpg', 'jpeg', 'gif']
+# CTF Categories coming from the pads are lower()ed before the lookup
+# in this map.
+CTF_CATEGORY_MAP = {'code': 'misc',
+                    'crypto': 'crypto',
+                    'cryptography': 'crypto',
+                    'exploit': 'pwn',
+                    'exploiting': 'pwn',
+                    'exploitation': 'pwn',
+                    'pwn': 'pwn',
+                    'pwning': 'pwn',
+                    'rev': 'reversing',
+                    'reverse': 'reversing',
+                    'reversing': 'reversing',
+                    'crack me': 'reversing',
+                    'crackme': 'reversing',
+                    'revcrypt': 'reversing',
+                    'web': 'web',
+                    'forensics': 'forensics',
+                    'forensic': 'forensics',
+                    'infoforensic': 'forensics',
+                    'misc': 'misc',
+                    'trivia': 'misc',
+                    'programming': 'misc',
+                    }
+CTF_CATEGORY_DEFAULT = 'Uncategorized'
+# CTF_BLACKLIST = ['meta', "training"]
+CTF_BLACKLIST = ['meta']
+
+# TODO: this is not a complete list, update as things fail
+MW_PAGETITLE_FORBIDDEN_CHARS = ['[', "]", "\n", "\r"]
+
+ALREADY_IMPORTED_CTFS = []
+
+
+def load_imported_ctfs_from(path="./imported-ctfs.json"):
+    try:
+        log.debug("reading from '%s'", path)
+        with open(path) as f:
+            global ALREADY_IMPORTED_CTFS
+            ALREADY_IMPORTED_CTFS = json.load(f)
+    except:
+        log.exception("failed to read from '%s'", path)
+
+
+def dump_imported_ctfs_to(path="./imported-ctfs.json"):
+    try:
+        log.debug("writing to '%s'", path)
+        with open(path, "w") as f:
+            json.dump(ALREADY_IMPORTED_CTFS, f)
+    except:
+        log.exception("failed to write to '%s'", path)
+
+
+def clean_trailing_whitespace(content):
+    l = []
+    for line in content.splitlines():
+        l.append(line.rstrip())
+    return "\n".join(l)
+
+
+def replace_a_with_mw(tree):
+    for a in tree.xpath("//a"):
+        if a.text and a.text.strip():
+            mwa = "[{} {}]".format(a.attrib['href'], a.text)
+        else:
+            mwa = "[{} {}]".format(a.attrib['href'], a.attrib['href'])
+        s = etree.Element("span")
+        s.text = mwa
+        s.attrib['class'] = 'plainlinks'
+        tree.replace(a, s)
+
+
+def replace_indent(content):
+    return content.replace("&#160;", " ").replace("&nbsp;", " ")
+
+
+def sanitize_html_pad(content):
+    parser = etree.HTMLParser()
+    html = etree.fromstring(content, parser=parser)
+    body = html.xpath("/html/body")[0]
+    replace_a_with_mw(body)
+    newcontent = ""
+    if body.text:
+        newcontent += body.text.strip()
+    for c in body:
+        if c.tag == "br":
+            newcontent += "<br/>\n"
+            if c.tail:
+                newcontent += c.tail
+        else:
+            newcontent += etree.tostring(c, pretty_print=True, method="html")
+    newcontent = replace_indent(newcontent)
+    newcontent = clean_trailing_whitespace(newcontent)
+    return newcontent
+
+
+def sanitize_bullet_points(content):
+    rx = re.compile(r'^\*([^\s])')
+    lines = []
+    for line in content.splitlines():
+        l = rx.sub(r"* \1", line)
+        lines.append(l)
+    return "\n".join(lines)
+
+
+def sanitize_mw_pagetitle(title):
+    for c in MW_PAGETITLE_FORBIDDEN_CHARS:
+        title = title.replace(c, " ")
+    return title
+
+
+def prepare_plain_text_pad(pad):
+    if "Welcome to Etherpad!" in pad \
+            and "Get involved with Etherpad" in pad:
+        log.warning("detected default pad content -- ignoring pad")
+        return ""
+    pad = sanitize_bullet_points(pad)
+    pad = pypandoc.convert_text(pad, "mediawiki", format="markdown_github")
+    return pad
+
+
+def format_page_title(ctf, chal):
+    pagetitle = "{} {} - {} ({})"\
+                .format(chal['category'], chal['points'], chal['title'],
+                        ctf['name'])
+    pagetitle = sanitize_mw_pagetitle(pagetitle)
+    return pagetitle
+
+
+def format_challenge_link(pagetitle, chal):
+    return "[[{}|{} ({} {})]]".format(pagetitle, chal['title'],
+                                      chal['category'], chal['points'])
+
+
+def create_ctf_page(ctf, challenges):
+
+    ctfid = ctf['id']
+
+    ctfpad = cl.ctf_pad_text(ctfid)['text']
+
+    pagetitle = "Category:" + ctf['name']
+    p = site.Pages[pagetitle]
+    t = "[[Category:CTFs]]\n"
+    t += "CTF meta pad content imported here:\n\n"
+
+    if p.exists and DO_OVERWRITE:
+        log.info("overwriting existing page '{}'".format(p.name))
+        content = t + prepare_plain_text_pad(ctfpad)
+        p.save(content)
+    return p
+
+
+def add_challenge_link(page, title, chal):
+    t = page.text()
+    t += "\n* " + format_challenge_link(title, chal)
+    page.save(t)
+
+
+def format_chal_meta(chal):
+    chal = chal.copy()
+    chal['assigned'] = ", ".join("[[User:{u}|{u}]]".format(u=u)
+                                 for u in chal['assigned'])
+    return """
+{{{{Infobox ChallengeMeta
+ |title={title}
+ |points={points}
+ |assigned={assigned}
+ |done={done}
+ |category={category}
+}}}}
+""".format(**chal)
+
+
+def create_challenge_page(ctf, ctfpage, chal, chalid):
+
+    # chalpadh = cl.challenge_pad_html(chalid)['html']
+    chalpadt = cl.challenge_pad_text(chalid)['text']
+
+    pagetitle = format_page_title(ctf, chal)
+
+    summary = "{} ctfpad content (created by pads2wiki)"\
+              .format(pagetitle)
+
+    p = site.Pages[pagetitle]
+    if p.exists:
+        if DO_OVERWRITE:
+            log.info("overwriting existing page '{}'".format(p.name))
+        else:
+            log.info("page with title exists: '{}'".format(pagetitle))
+            return p
+
+    log.info("Creating page with title: '{}'".format(pagetitle))
+
+    content = prepare_plain_text_pad(chalpadt)
+
+    mwcontent = ""
+    mwcontent += "[[Category:{}]]\n".format(ctf['name'])
+    ctfcat = CTF_CATEGORY_MAP.get(chal['category'].lower(), CTF_CATEGORY_DEFAULT)
+    mwcontent += "[[Category:{}]]\n".format(ctfcat)
+    if chal['done']:
+        mwcontent += "[[Category:Solved Task]]\n"
+    else:
+        mwcontent += "[[Category:Unsolved Task]]\n"
+    mwcontent += format_chal_meta(chal)
+    mwcontent += "\n"
+    mwcontent += content
+    p.save(mwcontent, summary=summary)
+    return p
+
+
+def create_ctf_category_pages(categories):
+    log.info("creating pages for the CTF categories")
+    p = site.Pages['Category:Task Categories']
+    if not p.exists:
+        p.save("Categories of challenges")
+
+    for cat in categories + [CTF_CATEGORY_DEFAULT]:
+        p = site.Pages["Category:" + cat]
+        if not p.exists:
+            log.info("creating new category {}".format(cat))
+            p.save("[[Category:Task Categories]]")
+
+
+def attach_file_to_page(chal, ctf, chalpage, chalid):
+    log.info("Found {} attached files for '{}'"
+            .format(chal['filecount'], chal['title']))
+
+    files = cl.challenge_files(chalid)["files"]
+    t = chalpage.text()
+    t += "\n== Attached Files ==\n\n"
+    for cf in files:
+        log.info("processing file '{}'".format(cf['name']))
+        url = "{}{}".format(cl.remote.strip("/"), cf['path'])
+        # mediawiki style link directly to the pad
+        linktopad = "[{} {}]".format(url, cf['name'])
+        # code for uploading to mediawiki
+        newname = "{}-{}".format(cf['id'], cf['name'])
+        desc = "file for challenge {} ({}) uploaded by {}"\
+                .format(chal['title'], ctf['name'], cf['user'])
+
+        t += "* " + linktopad + "\n"
+
+        ext = cf['name'].split(".")[-1]
+        if ext in SOURCE_FILE_EXTENSIONS:
+            try:
+                filecontent = cl.file_content(cf)
+                for codec in ("utf-8", "ascii", "iso8859_15",
+                        "iso8859_2", "utf-16", "utf-32"):
+                    try:
+                        filecontent = filecontent.decode(codec)
+                        break
+                    except Exception as e:
+                        s = ("failed to decode filecontent" +
+                                " of {} as {}: {}"
+                                .format(cf['name'], codec, e))
+                        log.warning(s)
+                else:
+                    log.warning("failed to decode filecontent of {}"
+                            .format(cf['name']))
+                    filecontent = "ERROR: failed to import"
+                s = "<syntaxhighlight lang={}>\n"
+                s += "{}\n"
+                s += "</syntaxhighlight>\n"
+                s = s.format((SOURCE_FILE_EXTENSIONS[ext]),
+                        filecontent)
+                t += "\n" + s + "\n"
+            except Exception as e:
+                log.exception(e)
+
+        # if image file, then display image in the wiki
+        # FIXME: the wiki rejects nearly all uploads because of a
+        # mimetype mismatch...
+        if ext in IMAGE_FILE_EXTENSIONS:
+            try:
+                site.upload(url, newname, desc)
+            except Exception as e:
+                log.info("mediawiki couldn't fetch url '{}' because {}"
+                        .format(url, e))
+                suffix = newname.split(".")[-1]
+                tempf = tempfile.NamedTemporaryFile("w+b", suffix=suffix)
+                try:
+                    filecontent = cl.file_content(cf)
+                    tempf.write(filecontent)
+                    tempf.flush()
+                    tempf.seek(0)
+                    site.upload(tempf, newname, desc)
+                    log.info("upload image to {}".format(newname))
+                except Exception as e:
+                    log.info("couldn't upload url '{}' because {}"
+                            .format(url, e))
+                finally:
+                    tempf.close()
+
+            img = site.Images[newname]
+            if img.exists:
+                log.info("Adding image")
+                t += "[[File:{}]]\n".format(newname)
+
+    chalpage.save(t)
+
+
+def import_challenge_pad(chal, ctf, ctfpage):
+    log.debug(chal)
+    log.info("Processing challenge '{}' id={}"
+            .format(chal['title'], chal['id']))
+    chalid = chal['id']
+    chal = cl.challenge(chalid)['challenge']
+    log.debug(chal)
+
+    chalpage = create_challenge_page(ctf, ctfpage, chal, chalid)
+
+    if "Attached Files" in chalpage.text():
+        log.info("skipping attached files for '{}'"
+                .format(chalpage.name))
+    elif chal['filecount'] > 0:
+        attach_file_to_page(chal, ctf, chalpage, chalid)
+
+
+def import_ctf_pads():
+    for ctf in cl.ctfs()['ctfs']:
+        ctfid = ctf['id']
+        ctfname = ctf['name']
+        if ctfname in ALREADY_IMPORTED_CTFS:
+            log.info("skipping ctf %s because it's in already imported list",
+                     ctfname)
+            continue
+
+        log.info("Processing CTF '{}' id={}".format(ctfname, ctfid))
+        # for testing
+        # if ctfname != "testCTF":
+        #     continue
+
+        if ctfname in CTF_BLACKLIST or ctfname.lower() in CTF_BLACKLIST:
+            log.info("skipping blacklisted ctf '{}'".format(ctfname))
+            continue
+
+        chals = cl.challenges(ctfid)['challenges']
+        log.info("got {} challenges".format(len(chals)))
+
+        ctfpage = create_ctf_page(ctf, chals)
+        for chal in chals:
+            import_challenge_pad(chal, ctf, ctfpage)
+
+        ALREADY_IMPORTED_CTFS.append(ctfname)
+
+
+def init_config(args):
+    cfg = configparser.ConfigParser()
+    if args.config:
+        cfg.read(args.config)
+    for x in ('wiki', 'ctfpad'):
+        if x not in cfg:
+            cfg[x] = {}
+
+    for val, section, entry in ((args.wiki_url, 'wiki', 'url'),
+                                (args.wiki_user, 'wiki', 'user'),
+                                (args.wiki_password, 'wiki', 'password'),
+                                (args.ctfpad_apikey, 'ctfpad', 'apikey'),
+                                (args.ctfpad_url, 'ctfpad', 'url')):
+        if val:
+            cfg[section][entry] = val
+        elif entry not in cfg[section]:
+            log.error("Missing %s/%s (either in config file or command line)",
+                      section, entry)
+            sys.exit(-1)
+
+    return cfg
+
+
+def init(config):
+    log.info("connecting to ctfpad")
+    global cl
+    cl = CTFPadClient(config['ctfpad']['url'],
+                      config['ctfpad']['apikey'],
+                      ssl_verify=True)
+    log.info("running ctfpad client as user '%s'", cl.whoami()['username'])
+
+    log.info("connecting to mediawiki")
+    global site
+    url = config['wiki']['url']
+    url = urlparse(url)
+    log.debug("mediawiki url: %s", url)
+    hostname = url.netloc
+    path = url.path
+    proto = url.scheme
+    user = config['wiki']['user']
+    password = config['wiki']['password']
+    site = mwclient.Site((proto, hostname), path=path)
+    site.login(user, password)
+
+
+def main():
+    parser = argparse.ArgumentParser()
+
+    # login related args
+    group = parser.add_argument_group('credentials')
+
+    group.add_argument("--wiki-url",
+                       help="URL to mediawiki")
+    group.add_argument("--wiki-user",
+                       help="mediawiki username")
+    group.add_argument("--wiki-password",
+                       help="mediawiki password")
+    group.add_argument("--ctfpad-apikey",
+                       help="API key of ctfpad user")
+    group.add_argument("--ctfpad-url",
+                       help="URL to ctfpad")
+
+    group.add_argument("-c", "--config",
+                       help="ini style config file. if not given all other"
+                       + " credential options must be set.")
+
+    # importing related args
+    parser.add_argument("--overwrite", action='store_true',
+                        help='Overwrite the contents of an existing wiki page')
+    parser.add_argument("--imported-ctf-list",
+                        default=None, type=str,
+                        help="path to json file containing already import ctfs")
+    # logging related args
+    parser.add_argument('--logfile',
+                        default="", type=str,
+                        help='Log output of this script to this file')
+    parser.add_argument('-q', '--quiet',
+                        default=False, action='store_true',
+                        help='Surpress console log output')
+    parser.add_argument("-v", "--verbose",
+                        action='store_true',
+                        help="enable debug log")
+
+    args = parser.parse_args(sys.argv[1:])
+
+    global log
+    log = setup_logging(console=(not args.quiet),
+                        logfile=args.logfile,
+                        loglevel=("debug" if args.verbose else "info"))
+
+    config = init_config(args)
+
+    init(config)
+
+
+    if args.imported_ctf_list:
+        try:
+            load_imported_ctfs_from(args.importedctflist)
+        except:
+            log.info("importing all ctfs")
+
+    log.info("Overwriting pages set to: {}".format(DO_OVERWRITE))
+
+    cats = list(set(CTF_CATEGORY_MAP.values()))
+    create_ctf_category_pages(cats)
+
+    import_ctf_pads()
+
+    if args.imported_ctf_list:
+        try:
+            dump_imported_ctfs_to(args.importedctflist)
+        except:
+            log.warning("couldn't save list of exported ctfs", exc_info=sys.exc_info())
