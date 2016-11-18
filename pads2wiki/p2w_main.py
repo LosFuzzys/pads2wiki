@@ -239,7 +239,18 @@ def format_chal_meta(chal):
 def create_challenge_page(ctf, ctfpage, chal, chalid):
 
     # chalpadh = cl.challenge_pad_html(chalid)['html']
-    chalpadt = cl.challenge_pad_text(chalid)['text']
+    chalpad = cl.challenge_pad_text(chalid)
+    log.debug(chalpad)
+    if "error" in chalpad:
+        log.warning("failed to get challenge pad: '{}'"
+                    .format(chalpad['error']))
+        if chal['filecount'] == 0:
+            return None
+        else:
+            log.debug("empty page with files for id={}".format(chalid))
+            chalpad['text'] = ''
+
+    chalpadt = chalpad['text']
 
     pagetitle = format_page_title(ctf, chal)
 
@@ -366,7 +377,7 @@ def attach_file_to_page(chal, ctf, chalpage, chalid):
 
 def import_challenge_pad(chal, ctf, ctfpage):
     log.debug(chal)
-    log.info("Processing challenge '{}' id={}"
+    log.info("Processing challenge '{}' (id={})"
             .format(chal['title'], chal['id']))
     chalid = chal['id']
     chal = cl.challenge(chalid)['challenge']
@@ -374,11 +385,14 @@ def import_challenge_pad(chal, ctf, ctfpage):
 
     chalpage = create_challenge_page(ctf, ctfpage, chal, chalid)
 
-    if "Attached Files" in chalpage.text():
-        log.info("skipping attached files for '{}'"
-                .format(chalpage.name))
-    elif chal['filecount'] > 0:
-        attach_file_to_page(chal, ctf, chalpage, chalid)
+    if chalpage:
+        if "Attached Files" in chalpage.text():
+            log.info("skipping attached files for '{}'"
+                    .format(chalpage.name))
+        elif chal['filecount'] > 0:
+            attach_file_to_page(chal, ctf, chalpage, chalid)
+    else:
+        log.warning("processing of challenge '{}' (id={}) failed")
 
 
 def import_ctf_pads():
