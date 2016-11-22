@@ -392,7 +392,8 @@ def import_challenge_pad(chal, ctf, ctfpage):
         elif chal['filecount'] > 0:
             attach_file_to_page(chal, ctf, chalpage, chalid)
     else:
-        log.warning("processing of challenge '{}' (id={}) failed")
+        log.warning("processing of challenge '{}' (id={}) failed"
+                    .format(chal['title'], chal['id']))
 
 
 def import_ctf_pads():
