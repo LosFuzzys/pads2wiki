@@ -35,7 +35,8 @@ from .setup_logging import setup_logging
 # to convert it to mw syntax.
 etree = None
 
-DO_OVERWRITE = False
+OVERWRITE_ALL = False
+OVERWRITE_CTFS = ['training']
 
 SOURCE_FILE_EXTENSIONS = {'py': 'python',
                           'rb': 'ruby',
@@ -218,11 +219,18 @@ def create_ctf_page(ctf, challenges):
     t = "[[Category:CTFs]]\n"
     t += "CTF meta pad content imported here:\n\n"
 
-    if p.exists and DO_OVERWRITE:
-        log.info("overwriting existing page '{}'".format(p.name))
+    should_save = False
+    if not p.exists:
+        should_save = True
+    else:
+        if OVERWRITE_ALL or ctf['name'] in OVERWRITE_CTFS:
+            should_save = True
+            log.info("overwriting existing page '{}'".format(p.name))
+
+    if should_save:
         content = t + prepare_plain_text_pad(ctfpad)
         p.save(content)
-    return p
+    return site.Pages[pagetitle]
 
 
 def add_challenge_link(page, title, chal):
@@ -268,12 +276,20 @@ def create_challenge_page(ctf, ctfpage, chal, chalid):
               .format(pagetitle)
 
     p = site.Pages[pagetitle]
-    if p.exists:
-        if DO_OVERWRITE:
+
+    should_save = False
+    if not p.exists:
+        should_save = True
+    else:
+        if OVERWRITE_ALL or ctf['name'] in OVERWRITE_CTFS:
+            should_save = True
             log.info("overwriting existing page '{}'".format(p.name))
-        else:
-            log.info("page with title exists: '{}'".format(pagetitle))
-            return p
+
+    if should_save:
+        log.info("overwriting existing page '{}'".format(p.name))
+    else:
+        log.info("page with title exists: '{}'".format(pagetitle))
+        return p
 
     log.info("Creating page with title: '{}'".format(pagetitle))
 
@@ -291,8 +307,9 @@ def create_challenge_page(ctf, ctfpage, chal, chalid):
     mwcontent += format_chal_meta(chal)
     mwcontent += "\n"
     mwcontent += content
+    # log.debug("Saving challenge with content\n'''\n" + mwcontent + "\n'''")
     p.save(mwcontent, summary=summary)
-    return p
+    return site.Pages[pagetitle]
 
 
 def create_ctf_category_pages(categories):
@@ -314,7 +331,7 @@ def attach_file_to_page(chal, ctf, chalpage, chalid):
 
     files = cl.challenge_files(chalid)["files"]
     t = chalpage.text()
-    t += "\n== Attached Files ==\n\n"
+    t = t + "\n\n== Attached Files ==\n\n"
     for cf in files:
         log.info("processing file '{}'".format(cf['name']))
         url = "{}{}".format(cl.remote.strip("/"), cf['path'])
@@ -383,6 +400,7 @@ def attach_file_to_page(chal, ctf, chalpage, chalid):
                 log.info("Adding image")
                 t += "[[File:{}]]\n".format(newname)
 
+    # log.debug("saving new attached content\n'''" + t + "\n'''")
     chalpage.save(t)
 
 
@@ -459,6 +477,14 @@ def init_config(args):
         for k, v in cfg['categorymap'].items():
             CTF_CATEGORY_MAP[k] = v
 
+    global OVERWRITE_ALL
+    global OVERWRITE_CTFS
+    if args.overwrite:
+        if len(args.overwrite) == 1 and args.overwrite[0].lower() == 'all':
+            OVERWRITE_ALL = True
+        else:
+            OVERWRITE_CTFS.extend(args.overwrite)
+
     return cfg
 
 
@@ -506,8 +532,10 @@ def main():
                             " credential options must be set.")
 
     # importing related args
-    parser.add_argument("--overwrite", action='store_true',
-                        help='Overwrite the contents of an existing wiki page')
+    parser.add_argument("--overwrite", nargs="*", default=None,
+                        help='Overwrite the contents of the wiki pages, if'
+                             'they exist, of the given list of'
+                             ' CTFs or \"all\" for all exported pages.')
     parser.add_argument("--imported-ctf-list",
                         default=None, type=str,
                         help="path to json file containing already "
@@ -540,7 +568,13 @@ def main():
         except:
             log.info("importing all ctfs")
 
-    log.info("Overwriting pages set to: {}".format(DO_OVERWRITE))
+    if OVERWRITE_ALL:
+        log.info("Overwriting pages set to: {}".format(OVERWRITE_ALL))
+    elif OVERWRITE_CTFS:
+        log.info("Overwriting pages belogning to CTFs: {}"
+                 .format(OVERWRITE_CTFS))
+    else:
+        log.info("Not overwriting any ctf pages")
 
     cats = list(set(CTF_CATEGORY_MAP.values()))
     create_ctf_category_pages(cats)
