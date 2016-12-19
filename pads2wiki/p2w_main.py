@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 
 # Copyright 2016 LosFuzzys. All rights reserved.
 #
@@ -14,20 +14,26 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import re
-import tempfile
-import sys
 import argparse
-import json
 import configparser
+import json
+import re
+import sys
+import tempfile
 from urllib.parse import urlparse
 
 import mwclient
+
 import pypandoc
 
-from .setup_logging import setup_logging
 from .padclient import CTFPadClient
+from .setup_logging import setup_logging
 
+# from lxml import etree
+# we don't parse html output of the pad for now, since it seems to be broken
+# anyway. we assume that there is github markdown in the pads and use pandoc
+# to convert it to mw syntax.
+etree = None
 
 DO_OVERWRITE = False
 
@@ -86,6 +92,10 @@ CTF_CATEGORY_MAP = {'code': 'misc',
                     'misc': 'misc',
                     'trivia': 'misc',
                     'programming': 'misc',
+                    'network': 'misc',
+                    'admin': 'misc',
+                    'pizza': 'pizza',
+                    'food': 'pizza'
                     }
 CTF_CATEGORY_DEFAULT = 'Uncategorized'
 # CTF_BLACKLIST = ['meta', "training"]
@@ -271,7 +281,8 @@ def create_challenge_page(ctf, ctfpage, chal, chalid):
 
     mwcontent = ""
     mwcontent += "[[Category:{}]]\n".format(ctf['name'])
-    ctfcat = CTF_CATEGORY_MAP.get(chal['category'].lower(), CTF_CATEGORY_DEFAULT)
+    ctfcat = CTF_CATEGORY_MAP.get(chal['category'].lower(),
+                                  CTF_CATEGORY_DEFAULT)
     mwcontent += "[[Category:{}]]\n".format(ctfcat)
     if chal['done']:
         mwcontent += "[[Category:Solved Task]]\n"
@@ -299,7 +310,7 @@ def create_ctf_category_pages(categories):
 
 def attach_file_to_page(chal, ctf, chalpage, chalid):
     log.info("Found {} attached files for '{}'"
-            .format(chal['filecount'], chal['title']))
+             .format(chal['filecount'], chal['title']))
 
     files = cl.challenge_files(chalid)["files"]
     t = chalpage.text()
@@ -312,7 +323,7 @@ def attach_file_to_page(chal, ctf, chalpage, chalid):
         # code for uploading to mediawiki
         newname = "{}-{}".format(cf['id'], cf['name'])
         desc = "file for challenge {} ({}) uploaded by {}"\
-                .format(chal['title'], ctf['name'], cf['user'])
+               .format(chal['title'], ctf['name'], cf['user'])
 
         t += "* " + linktopad + "\n"
 
@@ -321,24 +332,24 @@ def attach_file_to_page(chal, ctf, chalpage, chalid):
             try:
                 filecontent = cl.file_content(cf)
                 for codec in ("utf-8", "ascii", "iso8859_15",
-                        "iso8859_2", "utf-16", "utf-32"):
+                              "iso8859_2", "utf-16", "utf-32"):
                     try:
                         filecontent = filecontent.decode(codec)
                         break
                     except Exception as e:
-                        s = ("failed to decode filecontent" +
-                                " of {} as {}: {}"
-                                .format(cf['name'], codec, e))
+                        s = ("failed to decode filecontent"
+                             " of {} as {}: {}"
+                             .format(cf['name'], codec, e))
                         log.warning(s)
                 else:
                     log.warning("failed to decode filecontent of {}"
-                            .format(cf['name']))
+                                .format(cf['name']))
                     filecontent = "ERROR: failed to import"
                 s = "<syntaxhighlight lang={}>\n"
                 s += "{}\n"
                 s += "</syntaxhighlight>\n"
-                s = s.format((SOURCE_FILE_EXTENSIONS[ext]),
-                        filecontent)
+                s = s.format(SOURCE_FILE_EXTENSIONS[ext],
+                             filecontent)
                 t += "\n" + s + "\n"
             except Exception as e:
                 log.exception(e)
@@ -351,7 +362,7 @@ def attach_file_to_page(chal, ctf, chalpage, chalid):
                 site.upload(url, newname, desc)
             except Exception as e:
                 log.info("mediawiki couldn't fetch url '{}' because {}"
-                        .format(url, e))
+                         .format(url, e))
                 suffix = newname.split(".")[-1]
                 tempf = tempfile.NamedTemporaryFile("w+b", suffix=suffix)
                 try:
@@ -363,7 +374,7 @@ def attach_file_to_page(chal, ctf, chalpage, chalid):
                     log.info("upload image to {}".format(newname))
                 except Exception as e:
                     log.info("couldn't upload url '{}' because {}"
-                            .format(url, e))
+                             .format(url, e))
                 finally:
                     tempf.close()
 
@@ -378,7 +389,7 @@ def attach_file_to_page(chal, ctf, chalpage, chalid):
 def import_challenge_pad(chal, ctf, ctfpage):
     log.debug(chal)
     log.info("Processing challenge '{}' (id={})"
-            .format(chal['title'], chal['id']))
+             .format(chal['title'], chal['id']))
     chalid = chal['id']
     chal = cl.challenge(chalid)['challenge']
     log.debug(chal)
@@ -388,7 +399,7 @@ def import_challenge_pad(chal, ctf, ctfpage):
     if chalpage:
         if "Attached Files" in chalpage.text():
             log.info("skipping attached files for '{}'"
-                    .format(chalpage.name))
+                     .format(chalpage.name))
         elif chal['filecount'] > 0:
             attach_file_to_page(chal, ctf, chalpage, chalid)
     else:
@@ -444,6 +455,10 @@ def init_config(args):
                       section, entry)
             sys.exit(-1)
 
+    if 'categorymap' in cfg:
+        for k, v in cfg['categorymap'].items():
+            CTF_CATEGORY_MAP[k] = v
+
     return cfg
 
 
@@ -488,14 +503,15 @@ def main():
 
     group.add_argument("-c", "--config",
                        help="ini style config file. if not given all other"
-                       + " credential options must be set.")
+                            " credential options must be set.")
 
     # importing related args
     parser.add_argument("--overwrite", action='store_true',
                         help='Overwrite the contents of an existing wiki page')
     parser.add_argument("--imported-ctf-list",
                         default=None, type=str,
-                        help="path to json file containing already import ctfs")
+                        help="path to json file containing already "
+                             " import ctfs")
     # logging related args
     parser.add_argument('--logfile',
                         default="", type=str,
@@ -518,7 +534,6 @@ def main():
 
     init(config)
 
-
     if args.imported_ctf_list:
         try:
             load_imported_ctfs_from(args.importedctflist)
@@ -536,4 +551,5 @@ def main():
         try:
             dump_imported_ctfs_to(args.importedctflist)
         except:
-            log.warning("couldn't save list of exported ctfs", exc_info=sys.exc_info())
+            log.warning("couldn't save list of exported ctfs",
+                        exc_info=sys.exc_info())
