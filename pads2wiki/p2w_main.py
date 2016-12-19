@@ -170,15 +170,6 @@ def sanitize_html_pad(content):
     return newcontent
 
 
-def sanitize_bullet_points(content):
-    rx = re.compile(r'^\*([^\s])')
-    lines = []
-    for line in content.splitlines():
-        l = rx.sub(r"* \1", line)
-        lines.append(l)
-    return "\n".join(lines)
-
-
 def sanitize_mw_pagetitle(title):
     for c in MW_PAGETITLE_FORBIDDEN_CHARS:
         title = title.replace(c, " ")
@@ -190,8 +181,9 @@ def prepare_plain_text_pad(pad):
             and "Get involved with Etherpad" in pad:
         log.warning("detected default pad content -- ignoring pad")
         return ""
-    pad = sanitize_bullet_points(pad)
+    log.debug("converting pad content:\n'''\n" + pad + "\n'''")
     pad = pypandoc.convert_text(pad, "mediawiki", format="markdown_github")
+    log.debug("converted pad content:\n'''\n" + pad + "\n'''")
     return pad
 
 
