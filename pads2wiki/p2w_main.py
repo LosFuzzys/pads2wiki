@@ -102,6 +102,8 @@ CTF_CATEGORY_DEFAULT = 'Uncategorized'
 # CTF_BLACKLIST = ['meta', "training"]
 CTF_BLACKLIST = ['meta']
 
+MAX_SOURCE_LINES = 700
+
 # TODO: this is not a complete list, update as things fail
 MW_PAGETITLE_FORBIDDEN_CHARS = ['[', "]", "\n", "\r"]
 
@@ -354,14 +356,27 @@ def attach_file_to_page(chal, ctf, chalpage, chalid):
                     log.warning("failed to decode filecontent of {}"
                                 .format(cf['name']))
                     filecontent = "ERROR: failed to import"
+
+                linecount = filecontent.count("\n")
+                if linecount > MAX_SOURCE_LINES:
+                    lines = filecontent.split("\n")
+                    filecontent = "\n".join(lines[:MAX_SOURCE_LINES])
+                    filecontent += "\n\n[...]\n\n"
+                    filecontent += ("WARNING: truncated file because it"
+                                    " exceeds the maximum display size!")
+                    log.warning("truncating file '{}' to {} lines from {}"
+                                .format(cf['name'], MAX_SOURCE_LINES,
+                                        linecount))
                 s = "<syntaxhighlight lang={}>\n"
                 s += "{}\n"
                 s += "</syntaxhighlight>\n"
                 s = s.format(SOURCE_FILE_EXTENSIONS[ext],
                              filecontent)
                 t += "\n" + s + "\n"
-            except Exception as e:
-                log.exception(e)
+            except Exception:
+                log.warning("unkown error during processing of file '{}'"
+                            .format(cf['name']),
+                            exc_info=sys.exc_info())
 
         # if image file, then display image in the wiki
         # FIXME: the wiki rejects nearly all uploads because of a
@@ -392,7 +407,7 @@ def attach_file_to_page(chal, ctf, chalpage, chalid):
                 log.info("Adding image")
                 t += "[[File:{}]]\n".format(newname)
 
-    # log.debug("saving new attached content\n'''" + t + "\n'''")
+    log.debug("saving new attached content with length {}".format(len(t)))
     chalpage.save(t)
 
 
@@ -477,6 +492,12 @@ def init_config(args):
         else:
             OVERWRITE_CTFS.extend(args.overwrite)
 
+    global MAX_SOURCE_LINES
+    if 'uploadimages' in cfg['wiki']:
+        UPLOAD_IMAGES_TO_WIKI = cfg['wiki']['maxsrclines']
+    if args.wiki_max_src_lines:
+        UPLOAD_IMAGES_TO_WIKI = args.wiki_max_src_lines
+
     return cfg
 
 
@@ -532,6 +553,12 @@ def main():
                         default=None, type=str,
                         help="path to json file containing already "
                              " import ctfs")
+
+    # wiki import options
+    parser.add_argument("--wiki-max-src-lines",
+                        type=int, default=None,
+                        help="maximum number of lines of source code to embed"
+                             " in wiki")
     # logging related args
     parser.add_argument('--logfile',
                         default="", type=str,
