@@ -17,7 +17,6 @@
 import argparse
 import configparser
 import json
-import re
 import sys
 import tempfile
 from urllib.parse import urlparse
@@ -109,6 +108,11 @@ MAX_SOURCE_LINES = 700
 MW_PAGETITLE_FORBIDDEN_CHARS = ['[', "]", "\n", "\r"]
 
 ALREADY_IMPORTED_CTFS = []
+
+# global vars initialized in init function
+log = None
+cl = None
+site = None
 
 
 def load_imported_ctfs_from(path="./imported-ctfs.json"):
