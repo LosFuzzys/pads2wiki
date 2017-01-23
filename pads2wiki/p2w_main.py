@@ -102,6 +102,7 @@ CTF_CATEGORY_DEFAULT = 'Uncategorized'
 # CTF_BLACKLIST = ['meta', "training"]
 CTF_BLACKLIST = ['meta']
 
+UPLOAD_IMAGES_TO_WIKI = False
 MAX_SOURCE_LINES = 700
 
 # TODO: this is not a complete list, update as things fail
@@ -382,30 +383,38 @@ def attach_file_to_page(chal, ctf, chalpage, chalid):
         # FIXME: the wiki rejects nearly all uploads because of a
         # mimetype mismatch...
         if ext in IMAGE_FILE_EXTENSIONS:
-            try:
-                site.upload(url, newname, desc)
-            except Exception as e:
-                log.info("mediawiki couldn't fetch url '{}' because {}"
-                         .format(url, e))
-                suffix = newname.split(".")[-1]
-                tempf = tempfile.NamedTemporaryFile("w+b", suffix=suffix)
+            is_uploaded = False
+            if UPLOAD_IMAGES_TO_WIKI:
                 try:
-                    filecontent = cl.file_content(cf)
-                    tempf.write(filecontent)
-                    tempf.flush()
-                    tempf.seek(0)
-                    site.upload(tempf, newname, desc)
-                    log.info("upload image to {}".format(newname))
+                    site.upload(url, newname, desc)
+                    is_uploaded = True
                 except Exception as e:
-                    log.info("couldn't upload url '{}' because {}"
+                    log.info("mediawiki couldn't fetch url '{}' because {}"
                              .format(url, e))
-                finally:
-                    tempf.close()
+                    suffix = newname.split(".")[-1]
+                    tempf = tempfile.NamedTemporaryFile("w+b", suffix=suffix)
+                    try:
+                        filecontent = cl.file_content(cf)
+                        tempf.write(filecontent)
+                        tempf.flush()
+                        tempf.seek(0)
+                        site.upload(tempf, newname, desc)
+                        log.info("uploaded image to {}".format(newname))
+                        is_uploaded = True
+                    except Exception as e:
+                        log.info("couldn't upload url '{}' because {}"
+                                 .format(url, e))
+                    finally:
+                        tempf.close()
 
-            img = site.Images[newname]
-            if img.exists:
-                log.info("Adding image")
-                t += "[[File:{}]]\n".format(newname)
+            if is_uploaded:
+                img = site.Images[newname]
+                if img.exists:
+                    log.info("Adding image")
+                    t += "[[File:{}]]\n".format(newname)
+            else:
+                # https://www.mediawiki.org/wiki/Manual:$wgAllowExternalImages
+                t += url + "\n"
 
     log.debug("saving new attached content with length {}".format(len(t)))
     chalpage.save(t)
@@ -492,6 +501,12 @@ def init_config(args):
         else:
             OVERWRITE_CTFS.extend(args.overwrite)
 
+    global UPLOAD_IMAGES_TO_WIKI
+    if 'uploadimages' in cfg['wiki']:
+        UPLOAD_IMAGES_TO_WIKI = cfg['wiki']['uploadimages']
+    if args.wiki_upload_images:
+        UPLOAD_IMAGES_TO_WIKI = args.wiki_upload_images
+
     global MAX_SOURCE_LINES
     if 'uploadimages' in cfg['wiki']:
         UPLOAD_IMAGES_TO_WIKI = cfg['wiki']['maxsrclines']
@@ -559,6 +574,11 @@ def main():
                         type=int, default=None,
                         help="maximum number of lines of source code to embed"
                              " in wiki")
+    parser.add_argument("--wiki-upload-images",
+                        action='store_true',
+                        help="whether to upload images to the wiki or embed"
+                             " them as external images.")
+
     # logging related args
     parser.add_argument('--logfile',
                         default="", type=str,
