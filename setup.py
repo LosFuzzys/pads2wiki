@@ -37,6 +37,7 @@ setup(name="pads2wiki",
               'pads2wiki = pads2wiki:main',
               ],
           },
+      packages=['pads2wiki'],
       classifiers = [
           'Development Status :: 3 - Alpha',
           'Environment :: Console',
