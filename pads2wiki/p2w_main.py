@@ -259,6 +259,15 @@ def format_chal_meta(chal):
 """.format(**chal)
 
 
+def sanitize_pagetitle_for_mediawiki(title):
+    # https://www.mediawiki.org/wiki/Manual:Page_title
+    # remove # < > [ ] | { } _
+    for ch in '# < > [ ] | { } _'.split(' '):
+        if ch in title:
+            title = title.replace(ch, '')
+    return title
+
+
 def create_challenge_page(ctf, ctfpage, chal, chalid):
 
     # chalpadh = cl.challenge_pad_html(chalid)['html']
@@ -277,8 +286,12 @@ def create_challenge_page(ctf, ctfpage, chal, chalid):
 
     pagetitle = format_page_title(ctf, chal)
 
+    pagetitle = sanitize_pagetitle_for_mediawiki(pagetitle)
+
     summary = "{} ctfpad content (created by pads2wiki)"\
               .format(pagetitle)
+
+    log.info('retrieving page: {}'.format(pagetitle))
 
     p = site.Pages[pagetitle]
 
