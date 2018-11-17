@@ -210,8 +210,14 @@ def format_challenge_link(pagetitle, chal):
 def create_ctf_page(ctf, challenges):
 
     ctfid = ctf['id']
+    pad = cl.ctf_pad_text(ctfid)
 
-    ctfpad = cl.ctf_pad_text(ctfid)['text']
+    if 'error' in pad:
+        log.warning("failed to get ctf pad: '{}'"
+                    .format(pad['error']))
+        return
+
+    ctfpad = pad['text']
 
     pagetitle = "Category:" + ctf['name']
     p = site.Pages[pagetitle]
@@ -467,6 +473,8 @@ def import_ctf_pads():
         log.info("got {} challenges".format(len(chals)))
 
         ctfpage = create_ctf_page(ctf, chals)
+        if not ctfpage:
+            log.warning('No ctfpage for {}, importing chals anyway ...'.format(ctfname))
         for chal in chals:
             import_challenge_pad(chal, ctf, ctfpage)
 
